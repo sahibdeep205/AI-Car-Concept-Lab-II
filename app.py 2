@@ -1,0 +1,100 @@
+= []
+    session.modified = True
+    return jsonify({"success": True})
+
+
+def get_prefs(data: Any) -> dict[str, str]:
+    fields = [
+        ("style", "Hypercar"),
+        ("primary_color", "#1d4ed8"),
+        ("accent_color", "#f97316"),
+        ("material", "Carbon Fiber"),
+        ("occasion", "City Tech"),
+        ("inspiration", "Tokyo neon rain"),
+    ]
+    return {k: str(getattr(data, 'get', lambda *_: d)(k, d)).strip() for k, d in fields}
+
+
+def get_history() -> list[dict[str, Any]]:
+    return session.get("designs", [])
+
+
+def add_to_history(concept: dict[str, Any]) -> None:
+    current = session.get("designs", [])
+    deduped = [d for d in current if d.get("fingerprint") != concept["fingerprint"]]
+    session["designs"] = [concept] + deduped[: MAX_HISTORY - 1]
+    session.modified = True
+
+
+def fingerprint(prefs: dict[str, str], name: str) -> str:
+    raw = "|".join([*prefs.values(), name])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14]
+
+
+def generate_concept(prefs: dict[str, str]) -> dict[str, Any]:
+    if groq_client:
+        concept = generate_via_groq(prefs)
+        if concept:
+            return concept
+    return generate_local_concept(prefs)
+
+
+def generate_via_groq(prefs: dict[str, str]) -> dict[str, Any] | None:
+    raw = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": "Automotive concept design expert. Pure JSON only."},
+            {"role": "user", "content": DESIGN_PROMPT.format(**prefs)},
+        ],
+        temperature=0.85,
+        max_tokens=1200,
+    ).choices[0].message.content.strip()
+
+    cleaned = clean_ai_json_text(raw)
+    concept = json.loads(cleaned)
+    if not is_valid_concept(concept):
+        return None
+    return sanitize_concept(concept, prefs)
+
+
+def clean_ai_json_text(raw: str) -> str:
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip().rstrip("```").strip()
+    match = re.search(r"\{[\s\S]*\}", raw)
+    return match.group(0) if match else raw
+
+
+def is_valid_concept(concept: dict[str, Any]) -> bool:
+    required = {
+        "name", "tagline", "description", "materials", "features", "powertrain",
+        "cockpit_theme", "target_driver", "retail_price", "style_tags", "colorways",
+    }
+    return required.issubset(concept.keys()) and isinstance(concept.get("colorways"), list)
+
+
+def sanitize_concept(concept: dict[str, Any], brief: dict[str, str]) -> dict[str, Any]:
+    return {
+        "name": str(concept.get("name", "Concept X")).strip(),
+        "tagline": str(concept.get("tagline", "Future in motion.")).strip(),
+        "description": str(concept.get("description", "")).strip(),
+        "materials": [str(x).strip() for x in concept.get("materials", [])][:5] or MATERIAL_NOTES.get(brief["material"], [])[:3],
+        "features": [str(x).strip() for x in concept.get("features", [])][:6] or [
+            "Adaptive aero body surfaces", "Panoramic digital cockpit", "Active rear light blade", "Predictive drive intelligence"
+        ],
+        "powertrain": str(concept.get("powertrain", "Quad-motor electric performance")).strip(),
+        "cockpit_theme": str(concept.get("cockpit_theme", "Minimal driver-first cockpit")).strip(),
+        "target_driver": str(concept.get("target_driver", "Design-forward performance drivers")).strip(),
+        "retail_price": str(concept.get("retail_price", PRICE_BANDS.get(brief["occasion"], "$120,000"))).strip(),
+        "style_tags": [str(x).strip() for x in concept.get("style_tags", [])][:3] or STYLE_TAGS.get(brief["style"], [])[:3],
+        "colorways": normalize_colorways(concept.get("colorways", []), brief),
+    }
+
+
+def normalize_colorways(colorways: list[dict[str, Any]], brief: dict[str, str]) -> list[dict[str, str]]:
+    fallback = [
+        {"name": "Launch Spec", "body": brief["primary_color"], "accent": brief["accent_color"], "wheels": "#1b1e28", "cabin": "#d9dce5"},
+        {"name": "Midnight Pulse", "body": shift_hex(brief["primary_color"], -18), "accent": brief["accent_color"], "wheels": "#0f1218", "cabin": "#c7d2e2"},
+        {"name": "Solar Echo", "body": shift_hex(brief["primary_color"], 18), "accent": shift_hex(brief["accent_color"], 20), "wheels": "#2b2f3e",} "ca
